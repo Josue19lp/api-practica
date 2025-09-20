@@ -1,7 +1,7 @@
 import express from "express";
-import mysql from "mysql2";
 import cors from "cors";
 import dotenv from "dotenv";
+import { createPool } from "mysql2/promise";
 
 dotenv.config();
 
@@ -11,74 +11,153 @@ const PORT = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Conexión a MySQL
-const db = mysql.createConnection({
+// Pool MySQL
+const pool = createPool({
   host: process.env.MYSQLHOST,
   user: process.env.MYSQLUSER,
   password: process.env.MYSQLPASSWORD,
   database: process.env.MYSQLDATABASE,
-  port: process.env.MYSQLPORT
+  port: Number(process.env.MYSQLPORT || 3306),
+  waitForConnections: true,
+  connectionLimit: 10
 });
 
-db.connect(err => {
-  if (err) {
-    console.error("❌ Error al conectar a MySQL:", err);
-    return;
+// Helper: invocar SP
+async function spCrudVehiculos({
+  id = null,
+  id_marca = null,
+  id_modelo = null,
+  anio = null,
+  chasis = null,
+  motor = null,
+  nombre = null,
+  activo = null,
+  accion // 'C' | 'U' | 'D' | 'R'
+}) {
+  const sql = "CALL sp_crud_vehiculos(?,?,?,?,?,?,?,?,?)";
+  const params = [id, id_marca, id_modelo, anio, chasis, motor, nombre, activo, accion];
+  const [rows] = await pool.query(sql, params);
+  // Los SELECT del SP vienen en rows[0]
+  return Array.isArray(rows) ? rows[0] : rows;
+}
+
+// Health
+app.get("/health", async (_req, res) => {
+  try {
+    const conn = await pool.getConnection();
+    await conn.ping();
+    conn.release();
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
-  console.log("✅ Conectado a MySQL");
 });
 
-// RUTAS CRUD
-app.get("/usuarios", (req, res) => {
-  db.query("SELECT * FROM usuarios", (err, results) => {
-    if (err) return res.status(500).json(err);
-    res.json(results);
-  });
+/** Crear vehículo -> ACCION = 'C'
+ * Body requerido: { id_marca, id_modelo, anio, chasis, motor, nombre, activo }
+ */
+app.post("/vehiculos", async (req, res) => {
+  try {
+    const { id_marca, id_modelo, anio, chasis, motor, nombre, activo = 1 } = req.body ?? {};
+    // id = null para insertar (según tu ejemplo)
+    const data = await spCrudVehiculos({
+      id: null,
+      id_marca,
+      id_modelo,
+      anio,
+      chasis,
+      motor,
+      nombre,
+      activo,
+      accion: "C"
+    });
+    res.status(201).json({ message: "Vehículo creado", data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al crear vehículo", error: String(err) });
+  }
 });
 
-// RObtener usuario por ID
-app.get("/usuarios/:id", (req, res) => {
-  const sql = "SELECT * FROM usuarios WHERE id = ?";
-  db.query(sql, [req.params.id], (err, results) => {
-    if (err) return res.status(500).json(err);
-    if (results.length === 0) return res.status(404).json({ message: "Usuario no encontrado" });
-    res.json(results[0]);
-  });
+/** Actualizar vehículo -> ACCION = 'U'
+ * Body aceptado: { id_marca, id_modelo, anio, chasis, motor, nombre, activo }
+ */
+app.put("/vehiculos/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { id_marca, id_modelo, anio, chasis, motor, nombre, activo = 1 } = req.body ?? {};
+    const data = await spCrudVehiculos({
+      id,
+      id_marca,
+      id_modelo,
+      anio,
+      chasis,
+      motor,
+      nombre,
+      activo,
+      accion: "U"
+    });
+    res.json({ message: `Vehículo ${id} actualizado`, data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al actualizar vehículo", error: String(err) });
+  }
 });
 
-app.post("/usuarios", (req, res) => {
-  const { nombre, apellido, edad, correo } = req.body;
-  db.query(
-    "INSERT INTO usuarios (nombre, apellido, edad, correo) VALUES (?, ?, ?, ?)",
-    [nombre, apellido, edad, correo],
-    (err, result) => {
-      if (err) return res.status(500).json(err);
-      res.json({ id: result.insertId, nombre, apellido, edad, correo });
+/** Eliminar vehículo (lógico o según maneje tu SP) -> ACCION = 'D'
+ * Solo requiere :id en la ruta.
+ */
+app.delete("/vehiculos/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const data = await spCrudVehiculos({
+      id,
+      id_marca: null,
+      id_modelo: null,
+      anio: null,
+      chasis: null,
+      motor: null,
+      nombre: null,
+      activo: null,
+      accion: "D"
+    });
+    res.json({ message: `Vehículo ${id} eliminado`, data });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al eliminar vehículo", error: String(err) });
+  }
+});
+
+/** Buscar por ID -> ACCION = 'R'
+ * Devuelve el registro que el SP retorne con SELECT
+ */
+app.get("/vehiculos/:id", async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const data = await spCrudVehiculos({
+      id,
+      id_marca: null,
+      id_modelo: null,
+      anio: null,
+      chasis: null,
+      motor: null,
+      nombre: null,
+      activo: null,
+      accion: "R"
+    });
+    if (!data || (Array.isArray(data) && data.length === 0)) {
+      return res.status(404).json({ message: "Vehículo no encontrado" });
     }
-  );
+    res.json(data);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ message: "Error al consultar vehículo", error: String(err) });
+  }
 });
 
-app.put("/usuarios/:id", (req, res) => {
-  const { id } = req.params;
-  const { nombre, apellido, edad, correo } = req.body;
-  db.query(
-    "UPDATE usuarios SET nombre=?, apellido=?, edad=?, correo=? WHERE id=?",
-    [nombre, apellido, edad, correo, id],
-    (err) => {
-      if (err) return res.status(500).json(err);
-      res.json({ id, nombre, apellido, edad, correo });
-    }
-  );
-});
+// 404
+app.use((req, res) => res.status(404).json({ message: "Ruta no encontrada" }));
 
-app.delete("/usuarios/:id", (req, res) => {
-  const { id } = req.params;
-  db.query("DELETE FROM usuarios WHERE id=?", [id], (err) => {
-    if (err) return res.status(500).json(err);
-    res.json({ message: `Usuario ${id} eliminado` });
-  });
-});
-
+// Start
 app.listen(PORT, () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`🚀 API escuchando en http://localhost:${PORT}`);
 });
